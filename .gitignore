@@ -1,0 +1,15 @@
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Test and run artifacts
+TestResults/
+*.log
+RemoteFirewall-*/
