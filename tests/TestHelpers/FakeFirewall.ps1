@@ -2,7 +2,7 @@
 
 .DESCRIPTION Builders for fake NetSecurity objects (rules, the seven filter classes, profiles, settings) and the state the fake cmdlets read
 
-.VERSION 1.2.0
+.VERSION 1.3.0
 
 .GUID 70782af9-8c5a-4941-bdf3-96c6b1f42a27
 

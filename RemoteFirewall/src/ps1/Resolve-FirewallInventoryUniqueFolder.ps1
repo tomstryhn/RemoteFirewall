@@ -2,7 +2,7 @@
 
 .DESCRIPTION Creates a new directory at Path, or Path with a numbered suffix appended if Path exists
 
-.VERSION 1.2.0
+.VERSION 1.3.0
 
 .GUID cd0e2532-c64e-4439-b099-a3e757c6c5da
 

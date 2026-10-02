@@ -2,7 +2,7 @@
 
 .DESCRIPTION Builds a complete hand-made worker object for the host-side tests of RemoteFirewall
 
-.VERSION 1.2.0
+.VERSION 1.3.0
 
 .GUID 36259576-e978-48ba-b2a4-9e9c23ce43d7
 
@@ -110,7 +110,19 @@ function Get-FakeWorkerObject {
         [string]$ComputerId = '11111111-2222-3333-4444-555555555555',
 
         [AllowNull()]
-        [string]$MachineGuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        [string]$MachineGuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+
+        [AllowNull()]
+        [string]$MachineSid = 'S-1-5-21-1111111111-2222222222-3333333333',
+
+        [AllowNull()]
+        [string]$DomainSid = 'S-1-5-21-4444444444-5555555555-6666666666',
+
+        [AllowNull()]
+        [string]$ComputerAccountSid = 'S-1-5-21-4444444444-5555555555-6666666666-1104',
+
+        [AllowNull()]
+        [string]$DomainNetbiosName = 'CORP'
     )
 
     $packageSid = 'S-1-15-2-1234567890-1234567890-1234567890-1234567890-1234567890-1234567890-1234567890'
@@ -214,6 +226,10 @@ function Get-FakeWorkerObject {
         CollectedUtc           = '2026-09-30T10:00:00Z'
         ComputerId             = $ComputerId
         MachineGuid            = $MachineGuid
+        MachineSid             = $MachineSid
+        DomainSid              = $DomainSid
+        ComputerAccountSid     = $ComputerAccountSid
+        DomainNetbiosName      = $DomainNetbiosName
         ActiveProfile          = 'Domain'
         ProfileCount           = 3
         RuleCount              = $ruleCount

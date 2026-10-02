@@ -2,7 +2,7 @@
 
 .DESCRIPTION Defines small real enumeration types that stand in for the NetSecurity CIM enumerations in the RemoteFirewall tests
 
-.VERSION 1.2.0
+.VERSION 1.3.0
 
 .GUID f4af96d4-76b8-4f68-9566-3e59b256e411
 

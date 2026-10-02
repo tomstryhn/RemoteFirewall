@@ -2,7 +2,7 @@
 
 .DESCRIPTION Runs PSScriptAnalyzer and the Pester suite for RemoteFirewall
 
-.VERSION 1.2.0
+.VERSION 1.3.0
 
 .GUID d278ed76-493c-4fde-99e6-acb51520820d
 

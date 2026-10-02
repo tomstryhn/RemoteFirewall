@@ -2,7 +2,7 @@
 
 .DESCRIPTION Runs the worker on one or more remote computers with a single Invoke-Command call
 
-.VERSION 1.2.0
+.VERSION 1.3.0
 
 .GUID 5bbeeeb6-8b12-4066-afdb-7b15389eac2c
 
@@ -53,6 +53,10 @@ function Invoke-FirewallInventoryRemote {
         Forwarded to Invoke-Command as UseSSL when set. Omitted entirely, not passed as
         $false, when the caller does not supply it.
 
+    .PARAMETER SkipSidReference
+        Passed to the worker as its only argument, a real [bool], on every call: $false without
+        the switch and $true with it. The worker takes it as its first, positional parameter.
+
     .NOTES
         FUNCTION: Invoke-FirewallInventoryRemote
         AUTHOR:   Tom Stryhn
@@ -78,7 +82,9 @@ function Invoke-FirewallInventoryRemote {
         [Parameter(Mandatory = $true)]
         [scriptblock]$OnResult,
 
-        [switch]$UseSSL
+        [switch]$UseSSL,
+
+        [switch]$SkipSidReference
     )
 
     $invokeParams = @{
@@ -88,6 +94,8 @@ function Invoke-FirewallInventoryRemote {
         ErrorAction   = 'SilentlyContinue'
         ErrorVariable = 'remoteErrors'
     }
+    # Always passed, with or without the switch: the worker's first parameter is positional and a real bool, never a switch object or a string.
+    $invokeParams['ArgumentList'] = @([bool]$SkipSidReference)
     if ($Credential) { $invokeParams['Credential'] = $Credential }
     if ($UseSSL) { $invokeParams['UseSSL'] = $true }
 

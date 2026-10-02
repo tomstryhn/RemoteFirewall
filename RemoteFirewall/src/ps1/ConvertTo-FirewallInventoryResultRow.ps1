@@ -2,7 +2,7 @@
 
 .DESCRIPTION Builds one RemoteFirewall.Result row
 
-.VERSION 1.2.0
+.VERSION 1.3.0
 
 .GUID 55ec8f60-3c72-4c92-9b8c-417fa7e6c76c
 

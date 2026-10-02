@@ -2,7 +2,7 @@
 
 .DESCRIPTION Column lists, key orders and kinds of the RemoteFirewall contract, written out independently of the module source for the tests
 
-.VERSION 1.2.0
+.VERSION 1.3.0
 
 .GUID 62fc3c31-1238-436d-9683-c4ee4fc30b52
 
@@ -52,7 +52,8 @@ function Get-FirewallTestData {
 
     $identityKeys = @('ComputerName', 'DnsHostName', 'Domain', 'OSCaption', 'OSVersion', 'CurrentBuild', 'UBR',
         'DisplayVersion', 'EditionID', 'InstallationType', 'Culture', 'TimeZoneId', 'PSVersion', 'CollectedBy',
-        'PartOfDomain', 'IsElevated', 'DomainRole', 'CollectedUtc', 'ComputerId', 'MachineGuid')
+        'PartOfDomain', 'IsElevated', 'DomainRole', 'CollectedUtc', 'ComputerId', 'MachineGuid',
+        'MachineSid', 'DomainSid', 'ComputerAccountSid', 'DomainNetbiosName')
     $workerModuleKeys = @('ActiveProfile', 'ProfileCount', 'RuleCount', 'EnabledRuleCount', 'FilterFailedCount', 'SddlFailedCount', 'PackageCount',
         'AccountCount', 'AccountUnresolvedCount', 'ProfilesDurationMs', 'RulesDurationMs', 'FiltersDurationMs', 'PackagesDurationMs', 'AccountsDurationMs',
         'FilterFailedItems', 'SddlFailedItems', 'Profiles', 'Settings', 'Rules', 'Accounts', 'Errors')
@@ -164,7 +165,7 @@ function Get-FirewallTestData {
         )
         SystemKeys           = @($identityKeys + @('Collector', 'CollectorVersion', 'RunId') + $systemModuleKeys + @('Errors', 'Transport', 'RequestedComputerName', 'Status'))
         RunKeys              = @('RunId', 'Collector', 'CollectorVersion', 'SchemaVersion', 'HostComputer', 'HostComputerId',
-            'HostUser', 'PSVersion', 'StartUtc', 'EndUtc', 'RequestedComputers', 'ThrottleLimit', 'UseSSL', 'Results')
+            'HostUser', 'PSVersion', 'StartUtc', 'EndUtc', 'RequestedComputers', 'ThrottleLimit', 'UseSSL', 'SkipSidReference', 'Results')
         ResultCsvColumns     = @('ComputerName', 'ComputerId', 'Status', 'Transport', 'OutputFolder', 'IsElevated', 'ProfileCount', 'RuleCount',
             'FilterFailedCount', 'SddlFailedCount', 'AccountCount', 'AccountUnresolvedCount', 'Error', 'ErrorCount')
         ResultRowProperties  = @('ComputerName', 'ComputerId', 'Status', 'Transport', 'OutputFolder', 'IsElevated', 'ProfileCount', 'RuleCount',

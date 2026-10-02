@@ -2,7 +2,7 @@
 
 .DESCRIPTION Installs functions that shadow the ten NetSecurity cmdlets and Get-AppxPackage, which the RemoteFirewall worker calls, inside the module session state
 
-.VERSION 1.2.0
+.VERSION 1.3.0
 
 .GUID f5bd0e7d-e268-4d08-aeca-1742f877f557
 

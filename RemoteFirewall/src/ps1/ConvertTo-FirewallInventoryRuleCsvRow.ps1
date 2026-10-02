@@ -2,7 +2,7 @@
 
 .DESCRIPTION Builds the rules.csv row for one firewall rule
 
-.VERSION 1.2.0
+.VERSION 1.3.0
 
 .GUID 4a9c8182-be97-4e36-9015-a2457594083e
 

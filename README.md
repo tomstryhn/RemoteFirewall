@@ -22,6 +22,14 @@ Collects the Windows Firewall profile settings, the global settings, every firew
 
 ## Version Changes
 
+##### 1.3.0
+
+- Reads the SID reference of each computer and writes it to `system.json`: `MachineSid` (the SID of the computer's own account database, no RID), `DomainSid`, `ComputerAccountSid` (the full SID of the computer's own account in the domain) and `DomainNetbiosName`, in that order directly after `MachineGuid`. None is used as identity; they say whose an `S-1-5-21` SID is. `MachineSid` is the local account with RID 500 read through `Win32_UserAccount` with the computer name as `Domain`; the three domain values come from the computer's own domain account through the same account lookup the module uses for the principals of the rules, and are read only on a domain-joined computer. No Active Directory module and no LDAP is used.
+- `Win32_UserAccount` lists no local account on a domain controller, so `MachineSid` is null there. The three domain values are null on a workgroup computer. A domain-joined computer that cannot resolve its own account gets the error `identity: DomainSid: <message>` and a `Partial` row.
+- New switch `-SkipSidReference` leaves the four values unread (null in `system.json`, no error) and `run.json` records `SkipSidReference` true. It is meant for a caller that runs several collectors against the same computers and needs the reference from one of them only, as RemoteBaseline does. Without the switch every run reads it.
+- The worker scriptblock takes one parameter, `SkipSidReference`, as its first and positional one: the remote call hands it over as the only element of `-ArgumentList`.
+- Follows output convention 1.3: `run.json` carries `SchemaVersion` `1.3` and the key `SkipSidReference` directly after `UseSSL`.
+
 ##### 1.2.0
 
 - Every error message and every csv cell is one line. The result row collapses each entry of `Errors` (and so `Error`) to one line, which covers a multi-line remote connection error (also one attributed after the row was built), and the csv writer trims every text cell and collapses its whitespace to one space, so a row never spans lines in a spreadsheet. The json files keep the source form.
@@ -113,7 +121,7 @@ What the output contains, per computer folder:
 - `rules.csv` and `rules.json`: every rule in the active store, with its name, display name, description, group, profile, direction, action, owner SID, source (`PolicyStoreSource` and `PolicyStoreSourceType`), status, and the values of its seven filters: protocol, ports, addresses, program, package, service, interface aliases and type, authentication, encryption, and the users and machines of its security descriptors as SDDL text.
 - `accounts.csv` and `accounts.json`: every principal the rules name (owner, application package, and the SIDs in the security descriptors), with its SID, its resolved name where the target could resolve it (for an application package SID, its package family name), and how many rules name it. The rule names are in `accounts.json` only.
 - `summary.json`: the counts of the computer, the rule count by source type, the filter classes that could not be read, the number of installed package family names read, the durations of the steps and the unresolved account tokens.
-- `system.json`: the computer's name, domain, OS build, hardware UUID (`ComputerId`) and `MachineGuid`, the counts, and the result and errors of the computer.
+- `system.json`: the computer's name, domain, OS build, hardware UUID (`ComputerId`) and `MachineGuid`, the SID reference (`MachineSid`, `DomainSid`, `ComputerAccountSid` and `DomainNetbiosName`, which are null as described under How it works), the counts, and the result and errors of the computer.
 
 In the run folder, `results.csv` and `run.json` list the computers collected and the result and errors of each.
 
@@ -267,7 +275,7 @@ local and never go over WinRM. Anything else goes over WinRM through a single `I
 call.
 
 Over WinRM HTTPS with `-UseSSL`, using the FQDN that the target's listener certificate
-carries. `run.json` of that run has `UseSSL` True and `SchemaVersion` 1.2:
+carries. `run.json` of that run has `UseSSL` True and `SchemaVersion` 1.3:
 
 ```powershell
 PS C:\FirewallTest> Get-FirewallInventory -ComputerName 'SRV099.contoso.com' -UseSSL -OutputPath 'out' | Format-Table -Property ComputerName, ComputerId, Status, Transport, RuleCount, ErrorCount
@@ -315,6 +323,15 @@ The list of the functions contained in this module.
     files are written to a per-computer folder under -OutputPath together with the identity
     of the computer and every error seen on the way. A separate project analyses the files
     and decides which rules need attention.
+
+    The SID reference is four values that say whose an S-1-5-21 SID is: MachineSid (the SID
+    of the computer's own account database), DomainSid, ComputerAccountSid and
+    DomainNetbiosName. MachineSid is read from the local account with RID 500 through CIM
+    (Win32_UserAccount). The three domain values are read from the computer's own domain
+    account through the same account lookup the module uses for the principals of the rules,
+    and only on a domain-joined computer. No Active Directory module and no LDAP is used. A
+    domain controller has no MachineSid, and a workgroup computer has no domain values; both
+    stay null with no error.
 
     Not collected: connection security (IPsec) and main mode rules, Hyper-V firewall rules,
     hashes and signatures of rule programs, the registry rule stores, the persistent and
@@ -371,6 +388,13 @@ The list of the functions contained in this module.
 .PARAMETER ThrottleLimit
     Passed to Invoke-Command for remote targets. From 1 to 256. Defaults to 32.
 
+.PARAMETER SkipSidReference
+    Leaves the SID reference unread: MachineSid, DomainSid, ComputerAccountSid and
+    DomainNetbiosName are null in system.json, and run.json records SkipSidReference true.
+    Meant for a caller that runs several collectors against the same computers and needs the
+    reference from one of them only, as RemoteBaseline does. Without the switch every run
+    reads it.
+
 .EXAMPLE
     PS C:\> Get-FirewallInventory -OutputPath C:\FirewallRuns | Format-List
 
@@ -425,7 +449,7 @@ The list of the functions contained in this module.
 
     Collects from one domain member over WinRM HTTPS (port 5986). The name is the FQDN, which
     matches the listener certificate, and run.json of that run has UseSSL True and
-    SchemaVersion 1.2.
+    SchemaVersion 1.3.
 
 .NOTES
     FUNCTION: Get-FirewallInventory
@@ -450,7 +474,7 @@ Three sources are collected per computer: the settings of the three firewall pro
 
 All steps run through one self-contained worker: in-process for local targets, or once per call through `Invoke-Command` for remote targets, regardless of how many local aliases or remote names were requested. The worker runs on Windows PowerShell 5.1 on the target. It never throws: every step records its own error and moves on. It changes nothing on the target and writes nothing to its disk. In order, the worker:
 
-1. Reads the identity of the computer: names, domain, OS version and build, edition, culture, time zone, PowerShell version, whether the session is elevated, `ComputerId` and `MachineGuid`.
+1. Reads the identity of the computer: names, domain, OS version and build, edition, culture, time zone, PowerShell version, whether the session is elevated, `ComputerId` and `MachineGuid`, then the SID reference (see below) unless `-SkipSidReference` was given.
 2. Reads the profiles with `Get-NetFirewallProfile -PolicyStore ActiveStore`. A failure adds the error `profiles: <message>` and leaves `ProfileCount` at 0. The profiles are written Domain, Private, Public.
 3. Reads the global settings with `Get-NetFirewallSetting -PolicyStore ActiveStore`. A failure adds the error `settings: <message>`, an empty result adds `settings: no object returned`, and in both cases `globalsettings.json` is not written.
 4. Reads every rule with `Get-NetFirewallRule -PolicyStore ActiveStore -TracePolicyStore`. The traced read is what shows a Group Policy rule as `GroupPolicy` with the GPO name in `PolicyStoreSource`. A failure adds the error `rules: <message>`, leaves `RuleCount` null (not 0, because nothing was read), skips steps 5 and 6, and the row is `Failed`. A read that succeeds and returns no rule gives `RuleCount` 0 and the error `rules: no rule returned`, so the `Failed` row says why.
@@ -472,6 +496,8 @@ Every principal a rule names becomes one token in the account table, the SID as 
 Two facts about these principals. A rule can be owned by a user's SID (the `Owner` column of `rules.csv` then holds it, as the `accounts.csv` sample above shows for `S-1-5-21-1111111111-2222222222-3333333333-1001`, which 59 rules name and which resolves to `WS01\admin`), and the lookup runs on the target, so a SID resolves only where the target can translate it. A token such as an application package SID whose package is not installed or was not read (see step 7), a capability SID or a user from another machine that does not resolve is recorded as `NotFound`, which is data for the analysis, not an error: it never enters `Errors` and never changes `Status`.
 
 Every computer's identity includes `ComputerId` (`Win32_ComputerSystemProduct.UUID`, upper case, bound to the hardware or the virtual machine and unaffected by a rename or a domain move) and `MachineGuid` (bound to the Windows installation), both null when the read fails. `ComputerId` is in the result row and `system.json`. `MachineGuid` is in `system.json` only. `run.json` carries the collecting computer's own `ComputerId` as `HostComputerId`, read the same way, plus `Collector` and `SchemaVersion`, so a shared loader can tell which collector and which version of the output convention produced a run folder.
+
+The SID reference is read in the identity step, with two reads and no Active Directory module and no LDAP. `MachineSid` is the SID of the computer's own account database, taken from the built-in Administrator (RID 500, whatever its name or state) among the local accounts that `Win32_UserAccount` returns when the computer name is given as the domain, without the RID. `Win32_UserAccount` lists no local account on a domain controller, so `MachineSid` is null there, with no error. The domain values come from the computer's own account in the domain (`<domain>\<computer>$`, translated to a SID and back to a name through the same lookup the module uses for the principals of the rules): `ComputerAccountSid` is that SID with its RID, `DomainSid` is the SID without it and `DomainNetbiosName` is the domain part of the name it translates back to. They are read only on a domain-joined computer, so all three are null on a workgroup computer. A domain-joined computer that cannot resolve its own account gets the error `identity: DomainSid: <message>`, a `Partial` row and null domain values. `-SkipSidReference` leaves all four null with no error.
 
 Results are completed as they arrive rather than after every target has answered: each remote result has its folder written and its row built as soon as it arrives from `Invoke-Command`, and the reference to it is dropped before the next one is read.
 

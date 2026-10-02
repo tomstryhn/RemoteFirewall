@@ -2,7 +2,7 @@
 
 .DESCRIPTION Pester tests for the RemoteFirewall module
 
-.VERSION 1.2.0
+.VERSION 1.3.0
 
 .GUID 243205c7-1aaf-4e8c-af49-6915ebced0db
 
@@ -100,10 +100,13 @@ BeforeAll {
     function Invoke-WorkerInModule {
         param(
             [string]$Preference = 'Stop',
-            [switch]$Full
+            [switch]$Full,
+            [switch]$ReadSidReference
         )
+        # The SID reference is skipped unless a test asks for it: the identity mocks of most tests name a domain the test host is not in, and a read would send a real account lookup to it. The tests of the SID reference itself pass -ReadSidReference.
+        $skipSidReference = -not $ReadSidReference
         $worker = & $script:Module { Get-FirewallInventoryWorker }
-        $output = @(& $script:Module { param($w, $preference) $ErrorActionPreference = $preference; & $w } $worker $Preference 2>&1)
+        $output = @(& $script:Module { param($w, $preference, $skip) $ErrorActionPreference = $preference; & $w -SkipSidReference $skip } $worker $Preference $skipSidReference 2>&1)
         $errorRecords = @($output | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
         $results = @($output | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
         if ($Full) { return [pscustomobject]@{ Result = $results[0]; ResultCount = $results.Count; ErrorRecords = $errorRecords } }
@@ -116,10 +119,11 @@ BeforeAll {
             [Parameter(Mandatory = $true)]
             [hashtable]$State,
             [string]$Preference = 'Stop',
-            [switch]$Full
+            [switch]$Full,
+            [switch]$ReadSidReference
         )
         Use-FakeFirewallState -Module $script:Module -State $State
-        Invoke-WorkerInModule -Preference $Preference -Full:$Full
+        Invoke-WorkerInModule -Preference $Preference -Full:$Full -ReadSidReference:$ReadSidReference
     }
 
     # The rules of the shared InstanceID tests: every one has the id Shared-Id, and its own value in every filter class, told from its number. Number 1 is the local rule, 2 and 3 are Group Policy copies, sorted after each other by PolicyStoreSource: 'alpha GPO' (3) before 'Lab GPO' (2).
@@ -634,8 +638,9 @@ Describe 'Get-FirewallInventory - remote, Invoke-FirewallInventoryRemote mocked'
         $runJson.CollectorVersion | Should -Be $manifestVersion
         # Complete-FirewallInventoryComputer runs here inside the streaming callback, the other place the version is read.
         (Get-Content -LiteralPath (Join-Path $row1.OutputFolder 'system.json') -Raw | ConvertFrom-Json).CollectorVersion | Should -Be $manifestVersion
-        $runJson.SchemaVersion | Should -Be '1.2'
+        $runJson.SchemaVersion | Should -Be '1.3'
         $runJson.UseSSL | Should -Be $false
+        $runJson.SkipSidReference | Should -Be $false
 
         $csv = @(Import-Csv -LiteralPath (Join-Path -Path $runFolder[0].FullName -ChildPath 'results.csv'))
         $csv.Count | Should -Be 2
@@ -1661,12 +1666,13 @@ Describe 'Worker scriptblock - identity, return shape and call shape' {
 
             $state = Get-FakeFirewallState
             Add-FakeFirewallRule -State $state -Name 'Cim-Rule'
-            $result = Get-WorkerResult -State $state
+            $result = Get-WorkerResult -State $state -ReadSidReference
 
-            # In the order the worker runs its steps: OS and computer system, then computer identity. The firewall reads do not use CIM through Get-CimInstance, so they add nothing.
+            # In the order the worker runs its steps: OS and computer system, then computer identity, then the SID reference (the computer system read failed, so the computer is not known to be domain-joined and only MachineSid is read). The firewall reads do not use CIM through Get-CimInstance, so they add nothing.
             @($result.Errors) | Should -Be @(
                 'Get-CimInstance failed: CIM deliberately unavailable',
-                'identity: ComputerId: CIM deliberately unavailable'
+                'identity: ComputerId: CIM deliberately unavailable',
+                'identity: MachineSid: CIM deliberately unavailable'
             )
             $result.DnsHostName | Should -BeNullOrEmpty
             $result.Domain | Should -BeNullOrEmpty
@@ -1685,7 +1691,13 @@ Describe 'Worker scriptblock - identity, return shape and call shape' {
 
         It 'reads ComputerId upper case and MachineGuid as a GUID string on the test host, from the real CIM provider' {
             Mock -ModuleName RemoteFirewall -CommandName Get-CimInstance -ParameterFilter { $true } -MockWith {
-                CimCmdlets\Get-CimInstance -ClassName $ClassName -Verbose:$false
+                # The filter is forwarded when it was bound (a mock body has no $PSBoundParameters, so Get-Variable tells): without it a Win32_UserAccount read through this mock would list every account.
+                $filterVariable = Get-Variable -Name Filter -ErrorAction SilentlyContinue
+                if ($null -ne $filterVariable -and $null -ne $filterVariable.Value) {
+                    CimCmdlets\Get-CimInstance -ClassName $ClassName -Filter $filterVariable.Value -Verbose:$false
+                } else {
+                    CimCmdlets\Get-CimInstance -ClassName $ClassName -Verbose:$false
+                }
             }
             $state = Get-FakeFirewallState
             Add-FakeFirewallRule -State $state -Name 'Cim-Rule'
@@ -1703,9 +1715,14 @@ Describe 'Worker scriptblock - identity, return shape and call shape' {
             $script:WorkerBlock = & $script:Module { Get-FirewallInventoryWorker }
         }
 
-        It 'is a scriptblock with no parameters that switches strict mode off as its first statement' {
+        It 'is a scriptblock with the one parameter SkipSidReference, a bool false by default, that switches strict mode off as its first statement' {
             $script:WorkerBlock | Should -BeOfType [scriptblock]
-            $script:WorkerBlock.Ast.ParamBlock | Should -BeNullOrEmpty
+            $script:WorkerBlock.Ast.ParamBlock | Should -Not -BeNullOrEmpty
+            @($script:WorkerBlock.Ast.ParamBlock.Parameters).Count | Should -Be 1
+            $workerParameter = $script:WorkerBlock.Ast.ParamBlock.Parameters[0]
+            $workerParameter.Name.VariablePath.UserPath | Should -Be 'SkipSidReference'
+            $workerParameter.StaticType | Should -Be ([bool])
+            $workerParameter.DefaultValue.Extent.Text | Should -Be '$false'
             $firstStatement = $script:WorkerBlock.Ast.EndBlock.Statements[0]
             $firstStatement.Extent.Text | Should -Be 'Set-StrictMode -Off'
         }
@@ -1728,6 +1745,275 @@ Describe 'Worker scriptblock - identity, return shape and call shape' {
             $changing = @($commandNames | Where-Object { ($_ -match '^(Set|New|Remove|Add|Clear|Stop|Start|Restart|Disable|Enable|Update|Write)-' -or $_ -eq 'Invoke-Expression') -and $_ -notin $definedInside -and $_ -notin $allowed })
             $changing.Count | Should -Be 0 -Because "changing cmdlets found: $($changing -join ', ')"
         }
+    }
+}
+
+Describe 'Worker scriptblock - SID reference' {
+    BeforeAll {
+        Install-FakeNetSecurity -Module $script:Module
+        # Three local accounts of one computer account database, the built-in Administrator last, so the match cannot be a first-row accident. The prefix is what MachineSid must be.
+        $script:MachineSidPrefix = 'S-1-5-21-1111111111-2222222222-3333333333'
+        $script:LocalAccountRows = @(
+            [pscustomobject]@{ Name = 'Guest'; SID = "$($script:MachineSidPrefix)-501" },
+            [pscustomobject]@{ Name = 'Local1'; SID = "$($script:MachineSidPrefix)-1001" },
+            [pscustomobject]@{ Name = 'Admin'; SID = "$($script:MachineSidPrefix)-500" }
+        )
+        $script:ReadRuleState = {
+            $state = Get-FakeFirewallState
+            Add-FakeFirewallRule -State $state -Name 'Sid-Rule'
+            return $state
+        }
+    }
+
+    AfterAll {
+        Uninstall-FakeNetSecurity -Module $script:Module
+    }
+
+    It 'with -SkipSidReference true gives the four properties as null, no error line for them, and never queries Win32_UserAccount' {
+        $rows = $script:LocalAccountRows
+        # The computer is reported as domain-joined to a domain that does not exist: a skipped run must not look it up either.
+        Mock -ModuleName RemoteFirewall -CommandName Get-CimInstance -MockWith {
+            switch ($ClassName) {
+                'Win32_UserAccount' { $rows }
+                'Win32_ComputerSystem' { [pscustomobject]@{ DNSHostName = 'fakehost'; Domain = 'nosuchdomain.invalid'; PartOfDomain = $true; DomainRole = [uint16]3 } }
+                default { $filterVariable = Get-Variable -Name Filter -ErrorAction SilentlyContinue; if ($null -ne $filterVariable -and $null -ne $filterVariable.Value) { CimCmdlets\Get-CimInstance -ClassName $ClassName -Filter $filterVariable.Value -Verbose:$false } else { CimCmdlets\Get-CimInstance -ClassName $ClassName -Verbose:$false } }
+            }
+        }
+        $result = Get-WorkerResult -State (& $script:ReadRuleState)
+
+        foreach ($name in @('MachineSid', 'DomainSid', 'ComputerAccountSid', 'DomainNetbiosName')) {
+            $result.PSObject.Properties[$name] | Should -Not -BeNullOrEmpty -Because "the worker object has $name"
+            $result.$name | Should -BeNullOrEmpty -Because $name
+        }
+        @($result.Errors | Where-Object { $_ -like 'identity: MachineSid*' -or $_ -like 'identity: DomainSid*' -or $_ -like 'identity: DomainNetbiosName*' }).Count | Should -Be 0
+        @($result.Errors | Where-Object { $_ -like '*No mock for command*' -or $_ -like 'Get-CimInstance failed*' }).Count | Should -Be 0 -Because 'no read may hide behind the identity assertions: an unmocked or failed Get-CimInstance call shows as an error line'
+        Should -Invoke -ModuleName RemoteFirewall -CommandName Get-CimInstance -Exactly -Times 0 -Scope It -ParameterFilter { $ClassName -eq 'Win32_UserAccount' }
+    }
+
+    It 'takes MachineSid from the RID 500 row among rows ending in -501, -1001 and -500, with the computer name as the filter' {
+        $rows = $script:LocalAccountRows
+        Mock -ModuleName RemoteFirewall -CommandName Get-CimInstance -MockWith {
+            switch ($ClassName) {
+                'Win32_UserAccount' { $rows }
+                'Win32_ComputerSystem' { [pscustomobject]@{ DNSHostName = 'fakehost'; Domain = 'WORKGROUP'; PartOfDomain = $false; DomainRole = [uint16]1 } }
+                default { $filterVariable = Get-Variable -Name Filter -ErrorAction SilentlyContinue; if ($null -ne $filterVariable -and $null -ne $filterVariable.Value) { CimCmdlets\Get-CimInstance -ClassName $ClassName -Filter $filterVariable.Value -Verbose:$false } else { CimCmdlets\Get-CimInstance -ClassName $ClassName -Verbose:$false } }
+            }
+        }
+        $result = Get-WorkerResult -State (& $script:ReadRuleState) -ReadSidReference
+
+        $result.MachineSid | Should -BeExactly $script:MachineSidPrefix
+        @($result.Errors | Where-Object { $_ -like 'identity: MachineSid*' }).Count | Should -Be 0
+        @($result.Errors | Where-Object { $_ -like '*No mock for command*' -or $_ -like 'Get-CimInstance failed*' }).Count | Should -Be 0 -Because 'no read may hide behind the identity assertions: an unmocked or failed Get-CimInstance call shows as an error line'
+        $expectedFilter = 'Domain = "{0}"' -f $env:COMPUTERNAME
+        Should -Invoke -ModuleName RemoteFirewall -CommandName Get-CimInstance -Exactly -Times 1 -Scope It -ParameterFilter { $ClassName -eq 'Win32_UserAccount' -and $Filter -ceq $expectedFilter }
+    }
+
+    It 'gives a null MachineSid and no error line when Win32_UserAccount returns nothing, as on a domain controller' {
+        Mock -ModuleName RemoteFirewall -CommandName Get-CimInstance -MockWith {
+            switch ($ClassName) {
+                'Win32_UserAccount' { }
+                'Win32_ComputerSystem' { [pscustomobject]@{ DNSHostName = 'fakehost'; Domain = 'WORKGROUP'; PartOfDomain = $false; DomainRole = [uint16]1 } }
+                default { $filterVariable = Get-Variable -Name Filter -ErrorAction SilentlyContinue; if ($null -ne $filterVariable -and $null -ne $filterVariable.Value) { CimCmdlets\Get-CimInstance -ClassName $ClassName -Filter $filterVariable.Value -Verbose:$false } else { CimCmdlets\Get-CimInstance -ClassName $ClassName -Verbose:$false } }
+            }
+        }
+        $result = Get-WorkerResult -State (& $script:ReadRuleState) -ReadSidReference
+
+        $result.MachineSid | Should -BeNullOrEmpty
+        @($result.Errors | Where-Object { $_ -like 'identity: MachineSid*' }).Count | Should -Be 0
+        @($result.Errors | Where-Object { $_ -like '*No mock for command*' -or $_ -like 'Get-CimInstance failed*' }).Count | Should -Be 0 -Because 'no read may hide behind the identity assertions: an unmocked or failed Get-CimInstance call shows as an error line'
+    }
+
+    It 'gives a null MachineSid and exactly one identity: MachineSid line when Win32_UserAccount throws' {
+        Mock -ModuleName RemoteFirewall -CommandName Get-CimInstance -MockWith {
+            switch ($ClassName) {
+                'Win32_UserAccount' { throw 'accounts deliberately unavailable' }
+                'Win32_ComputerSystem' { [pscustomobject]@{ DNSHostName = 'fakehost'; Domain = 'WORKGROUP'; PartOfDomain = $false; DomainRole = [uint16]1 } }
+                default { $filterVariable = Get-Variable -Name Filter -ErrorAction SilentlyContinue; if ($null -ne $filterVariable -and $null -ne $filterVariable.Value) { CimCmdlets\Get-CimInstance -ClassName $ClassName -Filter $filterVariable.Value -Verbose:$false } else { CimCmdlets\Get-CimInstance -ClassName $ClassName -Verbose:$false } }
+            }
+        }
+        $result = Get-WorkerResult -State (& $script:ReadRuleState) -ReadSidReference
+
+        $result.MachineSid | Should -BeNullOrEmpty
+        $sidErrors = @($result.Errors | Where-Object { $_ -like 'identity: MachineSid: *' })
+        $sidErrors.Count | Should -Be 1
+        $sidErrors[0] | Should -Be 'identity: MachineSid: accounts deliberately unavailable'
+    }
+
+    It 'leaves the three domain values null and adds no identity: DomainSid line on a computer that is not part of a domain' {
+        $rows = $script:LocalAccountRows
+        Mock -ModuleName RemoteFirewall -CommandName Get-CimInstance -MockWith {
+            switch ($ClassName) {
+                'Win32_UserAccount' { $rows }
+                'Win32_ComputerSystem' { [pscustomobject]@{ DNSHostName = 'fakehost'; Domain = 'WORKGROUP'; PartOfDomain = $false; DomainRole = [uint16]1 } }
+                default { $filterVariable = Get-Variable -Name Filter -ErrorAction SilentlyContinue; if ($null -ne $filterVariable -and $null -ne $filterVariable.Value) { CimCmdlets\Get-CimInstance -ClassName $ClassName -Filter $filterVariable.Value -Verbose:$false } else { CimCmdlets\Get-CimInstance -ClassName $ClassName -Verbose:$false } }
+            }
+        }
+        $result = Get-WorkerResult -State (& $script:ReadRuleState) -ReadSidReference
+
+        $result.DomainSid | Should -BeNullOrEmpty
+        $result.ComputerAccountSid | Should -BeNullOrEmpty
+        $result.DomainNetbiosName | Should -BeNullOrEmpty
+        @($result.Errors | Where-Object { $_ -like 'identity: DomainSid*' }).Count | Should -Be 0
+        @($result.Errors | Where-Object { $_ -like '*No mock for command*' -or $_ -like 'Get-CimInstance failed*' }).Count | Should -Be 0 -Because 'no read may hide behind the identity assertions: an unmocked or failed Get-CimInstance call shows as an error line'
+        $result.MachineSid | Should -BeExactly $script:MachineSidPrefix
+    }
+
+    It 'leaves the three domain values null with exactly one identity: DomainSid line, no DomainNetbiosName line and MachineSid still set when the domain account cannot be looked up' {
+        $rows = $script:LocalAccountRows
+        Mock -ModuleName RemoteFirewall -CommandName Get-CimInstance -MockWith {
+            switch ($ClassName) {
+                'Win32_UserAccount' { $rows }
+                'Win32_ComputerSystem' { [pscustomobject]@{ DNSHostName = 'fakehost'; Domain = 'nosuchdomain.invalid'; PartOfDomain = $true; DomainRole = [uint16]3 } }
+                default { $filterVariable = Get-Variable -Name Filter -ErrorAction SilentlyContinue; if ($null -ne $filterVariable -and $null -ne $filterVariable.Value) { CimCmdlets\Get-CimInstance -ClassName $ClassName -Filter $filterVariable.Value -Verbose:$false } else { CimCmdlets\Get-CimInstance -ClassName $ClassName -Verbose:$false } }
+            }
+        }
+        $result = Get-WorkerResult -State (& $script:ReadRuleState) -ReadSidReference
+
+        $result.DomainSid | Should -BeNullOrEmpty
+        $result.ComputerAccountSid | Should -BeNullOrEmpty
+        $result.DomainNetbiosName | Should -BeNullOrEmpty
+        @($result.Errors | Where-Object { $_ -like 'identity: DomainSid: *' }).Count | Should -Be 1
+        @($result.Errors | Where-Object { $_ -like 'identity: DomainNetbiosName*' }).Count | Should -Be 0
+        $result.MachineSid | Should -BeExactly $script:MachineSidPrefix
+    }
+
+    It 'returns the four properties directly after MachineGuid, in the order MachineSid, DomainSid, ComputerAccountSid, DomainNetbiosName' {
+        $result = Get-WorkerResult -State (& $script:ReadRuleState)
+        $names = @($result.PSObject.Properties.Name)
+        $at = [array]::IndexOf($names, 'MachineGuid')
+        $at | Should -BeGreaterOrEqual 0
+        @($names[($at + 1)..($at + 4)]) | Should -Be @('MachineSid', 'DomainSid', 'ComputerAccountSid', 'DomainNetbiosName')
+    }
+
+    It 'passes the value from Invoke-FirewallInventoryLocal to the worker: null MachineSid and no Win32_UserAccount query with the switch, a MachineSid and one query without' {
+        $rows = $script:LocalAccountRows
+        Mock -ModuleName RemoteFirewall -CommandName Get-CimInstance -MockWith {
+            switch ($ClassName) {
+                'Win32_UserAccount' { $rows }
+                'Win32_ComputerSystem' { [pscustomobject]@{ DNSHostName = 'fakehost'; Domain = 'WORKGROUP'; PartOfDomain = $false; DomainRole = [uint16]1 } }
+                default { $filterVariable = Get-Variable -Name Filter -ErrorAction SilentlyContinue; if ($null -ne $filterVariable -and $null -ne $filterVariable.Value) { CimCmdlets\Get-CimInstance -ClassName $ClassName -Filter $filterVariable.Value -Verbose:$false } else { CimCmdlets\Get-CimInstance -ClassName $ClassName -Verbose:$false } }
+            }
+        }
+        Use-FakeFirewallState -Module $script:Module -State (& $script:ReadRuleState)
+
+        $skipped = & $script:Module { Invoke-FirewallInventoryLocal -SkipSidReference }
+        $skipped.MachineSid | Should -BeNullOrEmpty
+        Should -Invoke -ModuleName RemoteFirewall -CommandName Get-CimInstance -Exactly -Times 0 -Scope It -ParameterFilter { $ClassName -eq 'Win32_UserAccount' }
+
+        $read = & $script:Module { Invoke-FirewallInventoryLocal }
+        $read.MachineSid | Should -BeExactly $script:MachineSidPrefix
+        Should -Invoke -ModuleName RemoteFirewall -CommandName Get-CimInstance -Exactly -Times 1 -Scope It -ParameterFilter { $ClassName -eq 'Win32_UserAccount' }
+    }
+
+    It 'reads a MachineSid of this host from the real CIM provider, or null on a domain controller, with the domain values null on a workgroup host' {
+        $result = Get-WorkerResult -State (& $script:ReadRuleState) -ReadSidReference
+
+        if ($result.DomainRole -ge 4) {
+            $result.MachineSid | Should -BeNullOrEmpty
+        } else {
+            $result.MachineSid | Should -Match '^S-1-5-21-\d+-\d+-\d+$'
+        }
+        if (-not $result.PartOfDomain) {
+            $result.DomainSid | Should -BeNullOrEmpty
+            $result.ComputerAccountSid | Should -BeNullOrEmpty
+            $result.DomainNetbiosName | Should -BeNullOrEmpty
+            @($result.Errors | Where-Object { $_ -like 'identity: *Sid*' -or $_ -like 'identity: DomainNetbiosName*' }).Count | Should -Be 0
+        }
+    }
+}
+
+Describe 'Invoke-FirewallInventoryRemote - the SkipSidReference argument' {
+    It 'hands Invoke-Command an ArgumentList of exactly one element, the bool false, when the switch is not given' {
+        InModuleScope RemoteFirewall {
+            Mock Invoke-Command -MockWith { return @() }
+
+            $null = Invoke-FirewallInventoryRemote -ComputerName @('remote1') -ThrottleLimit 4 -OnResult {}
+
+            Should -Invoke Invoke-Command -Exactly -Times 1 -ParameterFilter {
+                @($ArgumentList).Count -eq 1 -and $ArgumentList[0] -is [bool] -and $ArgumentList[0] -eq $false
+            }
+        }
+    }
+
+    It 'hands Invoke-Command an ArgumentList of exactly one element, the bool true, with the switch' {
+        InModuleScope RemoteFirewall {
+            Mock Invoke-Command -MockWith { return @() }
+
+            $null = Invoke-FirewallInventoryRemote -ComputerName @('remote1') -ThrottleLimit 4 -OnResult {} -SkipSidReference
+
+            Should -Invoke Invoke-Command -Exactly -Times 1 -ParameterFilter {
+                @($ArgumentList).Count -eq 1 -and $ArgumentList[0] -is [bool] -and $ArgumentList[0] -eq $true
+            }
+        }
+    }
+}
+
+Describe 'Get-FirewallInventory - SkipSidReference forwarding, run.json and system.json' {
+    It 'forwards the switch to the local path in both states and records SkipSidReference right after UseSSL in run.json' -ForEach @(
+        @{ Skip = $false },
+        @{ Skip = $true }
+    ) {
+        Mock -ModuleName RemoteFirewall -CommandName Invoke-FirewallInventoryLocal -MockWith { Get-FakeWorkerObject -ComputerName $env:COMPUTERNAME }
+        $outPath = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
+        $null = @(Get-FirewallInventory -ComputerName 'localhost' -OutputPath $outPath -SkipSidReference:$Skip)
+
+        $expected = $Skip
+        Should -Invoke -ModuleName RemoteFirewall -CommandName Invoke-FirewallInventoryLocal -Exactly -Times 1 -Scope It -ParameterFilter { [bool]$SkipSidReference -eq $expected }
+        $runFolder = @(Get-ChildItem -LiteralPath $outPath -Directory -Filter 'RemoteFirewall-*')[0].FullName
+        $runJson = Get-Content -LiteralPath (Join-Path -Path $runFolder -ChildPath 'run.json') -Raw | ConvertFrom-Json
+        $names = @($runJson.PSObject.Properties.Name)
+        $names[[array]::IndexOf($names, 'UseSSL') + 1] | Should -Be 'SkipSidReference'
+        $runJson.SkipSidReference | Should -Be $Skip
+        $runJson.SchemaVersion | Should -Be '1.3'
+    }
+
+    It 'forwards the switch to the remote path in both states and records SkipSidReference right after UseSSL in run.json' -ForEach @(
+        @{ Skip = $false },
+        @{ Skip = $true }
+    ) {
+        $reachedName = 'remote5'
+        $goodWorker = Get-FakeWorkerObject -ComputerName $reachedName.ToUpperInvariant() -PSComputerNameValue $reachedName
+        Mock -ModuleName RemoteFirewall -CommandName Invoke-FirewallInventoryRemote -MockWith {
+            & $OnResult $goodWorker
+            [pscustomobject]@{ Errors = @() }
+        }
+        $outPath = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
+        $null = @($reachedName | Get-FirewallInventory -OutputPath $outPath -SkipSidReference:$Skip)
+
+        $expected = $Skip
+        Should -Invoke -ModuleName RemoteFirewall -CommandName Invoke-FirewallInventoryRemote -Exactly -Times 1 -Scope It -ParameterFilter { [bool]$SkipSidReference -eq $expected }
+        $runFolder = @(Get-ChildItem -LiteralPath $outPath -Directory -Filter 'RemoteFirewall-*')[0].FullName
+        $runJson = Get-Content -LiteralPath (Join-Path -Path $runFolder -ChildPath 'run.json') -Raw | ConvertFrom-Json
+        $names = @($runJson.PSObject.Properties.Name)
+        $names[[array]::IndexOf($names, 'UseSSL') + 1] | Should -Be 'SkipSidReference'
+        $runJson.SkipSidReference | Should -Be $Skip
+        $runJson.SchemaVersion | Should -Be '1.3'
+    }
+
+    It 'writes the four keys right after MachineGuid in system.json with the values of the worker object' {
+        $row = Invoke-CompleteInModule -WorkerObject (Get-FakeWorkerObject)
+        $system = Get-Content -LiteralPath (Join-Path $row.OutputFolder 'system.json') -Raw | ConvertFrom-Json
+        $names = @($system.PSObject.Properties.Name)
+        $at = [array]::IndexOf($names, 'MachineGuid')
+        @($names[($at + 1)..($at + 4)]) | Should -Be @('MachineSid', 'DomainSid', 'ComputerAccountSid', 'DomainNetbiosName')
+        $system.MachineSid | Should -Be 'S-1-5-21-1111111111-2222222222-3333333333'
+        $system.DomainSid | Should -Be 'S-1-5-21-4444444444-5555555555-6666666666'
+        $system.ComputerAccountSid | Should -Be 'S-1-5-21-4444444444-5555555555-6666666666-1104'
+        $system.DomainNetbiosName | Should -Be 'CORP'
+    }
+
+    It 'writes the four keys as null in system.json for a worker object that lacks the properties, and the row is still Success' {
+        $worker = Get-FakeWorkerObject
+        foreach ($name in @('MachineSid', 'DomainSid', 'ComputerAccountSid', 'DomainNetbiosName')) { $worker.PSObject.Properties.Remove($name) }
+        $row = Invoke-CompleteInModule -WorkerObject $worker
+        $system = Get-Content -LiteralPath (Join-Path $row.OutputFolder 'system.json') -Raw | ConvertFrom-Json
+        $names = @($system.PSObject.Properties.Name)
+        $at = [array]::IndexOf($names, 'MachineGuid')
+        @($names[($at + 1)..($at + 4)]) | Should -Be @('MachineSid', 'DomainSid', 'ComputerAccountSid', 'DomainNetbiosName')
+        foreach ($name in @('MachineSid', 'DomainSid', 'ComputerAccountSid', 'DomainNetbiosName')) {
+            $system.$name | Should -BeNullOrEmpty -Because $name
+        }
+        $row.Status | Should -Be 'Success'
     }
 }
 
@@ -4398,7 +4684,8 @@ Describe 'The worker and the host joined, over fake NetSecurity cmdlets' {
             Add-FakeFirewallRule -State $state -Name 'Pub-B' -RuleSet @{ Enabled = [RemoteFirewallTests.FwBool]::False }
             Use-FakeFirewallState -Module $script:Module -State $state
             $outPath = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
-            $script:Rows = @(Get-FirewallInventory -ComputerName $env:COMPUTERNAME -OutputPath $outPath)
+            # -SkipSidReference: the identity mock of this Describe names a domain the test host is not in, and a read would send a real account lookup to it.
+            $script:Rows = @(Get-FirewallInventory -ComputerName $env:COMPUTERNAME -OutputPath $outPath -SkipSidReference)
         }
 
         It 'gives one Success row with the counts of the fake target and all nine files' {

@@ -2,7 +2,7 @@
 
 .DESCRIPTION Returns the self-contained scriptblock that collects the firewall inventory on a target
 
-.VERSION 1.2.0
+.VERSION 1.3.0
 
 .GUID dd6fa18d-5095-4296-ae0b-7a76eaa171c1
 
@@ -27,8 +27,13 @@ function Get-FirewallInventoryWorker {
     .DESCRIPTION
         The scriptblock this function returns is what actually runs on the target, local or
         remote, so it uses no module function, no module variable and no using: expression. It
-        takes no parameters and depends on nothing from the caller's session. It reads the
-        three firewall profiles and the global settings as enforced (the active store), every
+        takes one parameter, SkipSidReference, and depends on nothing else from the caller's
+        session. The parameter is a [bool], false by default, and the first one of the
+        scriptblock because the remote call passes it by position; when true the four SID
+        reference values are not read and are null, with no error. It reads the SID reference (MachineSid, from the local account with RID 500
+        read through Win32_UserAccount, and on a domain-joined computer DomainSid,
+        ComputerAccountSid and DomainNetbiosName, from the computer's own domain account through
+        an account lookup), the three firewall profiles and the global settings as enforced (the active store), every
         firewall rule of the active store, the seven filter classes of those rules (one call per
         class, joined on InstanceID), and the SID of every principal the rules name (the owner,
         the application package and the access control entries of the user and machine
@@ -57,6 +62,11 @@ function Get-FirewallInventoryWorker {
     param()
 
     return {
+        # First and positional: Invoke-Command passes its ArgumentList by position, so a parameter added before this one would receive the wrong value.
+        param(
+            [bool]$SkipSidReference = $false
+        )
+
         # Off here, not only in the public function, so the worker behaves the same in-process as on a remote target, where strict mode is off by default.
         Set-StrictMode -Off
 
@@ -330,6 +340,51 @@ function Get-FirewallInventoryWorker {
             $machineGuid = [string](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -ErrorAction Stop).MachineGuid
         }
         catch { $errors += "identity: MachineGuid: $($_.Exception.Message)" }
+        #endregion
+
+        #region SID reference
+        # Four reference values that say whose an S-1-5-21 SID is; none is used as identity. MachineSid is the SID of the computer's own account database: the built-in Administrator (RID 500, whatever its name or state) without the RID. The filter names the computer as the domain, so only the local accounts are read; a domain controller has no such row and keeps null with no error. The domain values come from the computer's own account and are read only on a domain-joined computer. -SkipSidReference leaves all four null with no error.
+        $machineSid = $null
+        $domainSid = $null
+        $computerAccountSid = $null
+        $domainNetbiosName = $null
+        if (-not $SkipSidReference) {
+            try {
+                $localAccounts = @(Get-CimInstance -ClassName Win32_UserAccount -Filter ('Domain = "{0}"' -f $env:COMPUTERNAME) -ErrorAction Stop -Verbose:$false)
+                foreach ($localAccount in $localAccounts) {
+                    if ([string]$localAccount.SID -match '^(S-1-5-21-\d+-\d+-\d+)-500$') {
+                        $machineSid = $matches[1]
+                        break
+                    }
+                }
+            }
+            catch { $errors += "identity: MachineSid: $($_.Exception.Message)" }
+
+            if ($partOfDomain) {
+                $computerAccountSidObject = $null
+                try {
+                    $computerAccount = New-Object System.Security.Principal.NTAccount(($domain + '\' + $env:COMPUTERNAME + '$'))
+                    $computerAccountSidObject = $computerAccount.Translate([System.Security.Principal.SecurityIdentifier])
+                    $computerAccountSid = $computerAccountSidObject.Value
+                    $domainSid = $computerAccountSidObject.AccountDomainSid.Value
+                }
+                catch {
+                    $computerAccountSidObject = $null
+                    $computerAccountSid = $null
+                    $domainSid = $null
+                    $errors += "identity: DomainSid: $($_.Exception.GetBaseException().Message)"
+                }
+
+                if ($null -ne $computerAccountSidObject) {
+                    try {
+                        $computerAccountName = $computerAccountSidObject.Translate([System.Security.Principal.NTAccount]).Value
+                        $separatorIndex = $computerAccountName.IndexOf('\')
+                        if ($separatorIndex -gt 0) { $domainNetbiosName = $computerAccountName.Substring(0, $separatorIndex) }
+                    }
+                    catch { $errors += "identity: DomainNetbiosName: $($_.Exception.GetBaseException().Message)" }
+                }
+            }
+        }
         #endregion
 
         #region Profiles
@@ -774,6 +829,10 @@ function Get-FirewallInventoryWorker {
             CollectedUtc           = $collectedUtc
             ComputerId             = $computerId
             MachineGuid            = $machineGuid
+            MachineSid             = $machineSid
+            DomainSid              = $domainSid
+            ComputerAccountSid     = $computerAccountSid
+            DomainNetbiosName      = $domainNetbiosName
             ActiveProfile          = $activeProfile
             ProfileCount           = [int]$profileCount
             RuleCount              = $ruleCount
